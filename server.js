@@ -214,15 +214,19 @@ function escutarPedidosDeConexao() {
         .channel('pedidos_whatsapp')
         .on(
             'postgres_changes', 
-            { event: '*', schema: 'public', table: 'whatsapp_sessions' }, 
+            { event: 'UPDATE', schema: 'public', table: 'whatsapp_sessions' }, 
             (payload) => {
                 const dados = payload.new;
                 const antigos = payload.old;
 
                 if (!dados) return;
 
-                // EVITA RE-DISPARO SE O UPDATE FOI APENAS A GRAVAÇÃO DO CÓDIGO/QR
-                if (dados.qr_code_base64 && dados.qr_code_base64 !== antigos?.qr_code_base64 && (dados.qr_code_base64.length > 20 || dados.qr_code_base64.length === 8)) {
+                // FILTRO ANTI-LOOP: Ignora o evento se for a gravação do QR (DataURL) ou do Código de 8 dígitos (Regex)
+                const valorAtual = dados.qr_code_base64 || '';
+                const eCodigoPar = /^[A-Z0-9]{4}-[A-Z0-9]{4}$/i.test(valorAtual) || valorAtual.length === 8;
+                const eImagemQR = valorAtual.startsWith('data:image');
+
+                if (eCodigoPar || eImagemQR) {
                     return;
                 }
 
@@ -231,12 +235,15 @@ function escutarPedidosDeConexao() {
                     console.log(`📡 Solicitando QR Code para: ${dados.user_id}`);
                     iniciarSessaoUsuario(dados.user_id);
                 } 
-                // PEDIDO DE CÓDIGO DE PAREAMENTO
-                else if (dados.status_conexao === 'aguardando_codigo' && dados.qr_code_base64) {
-                    const numeroInformado = dados.qr_code_base64.replace(/\D/g, '');
-                    if (numeroInformado.length >= 10 && antigos?.qr_code_base64 !== dados.qr_code_base64) {
-                        console.log(`📡 Solicitando Pairing Code para número: ${numeroInformado}`);
-                        iniciarSessaoUsuario(dados.user_id, numeroInformado);
+                // PEDIDO DE CÓDIGO DE PAREAMENTO (Exige entre 10 e 13 dígitos numéricos)
+                else if (dados.status_conexao === 'aguardando_codigo') {
+                    const numeroApenasDigitos = valorAtual.replace(/\D/g, '');
+                    const eNumeroValido = numeroApenasDigitos.length >= 10 && numeroApenasDigitos.length <= 13;
+                    const numeroMudou = antigos?.qr_code_base64 !== dados.qr_code_base64;
+
+                    if (eNumeroValido && numeroMudou) {
+                        console.log(`📡 Solicitando Pairing Code para número: ${numeroApenasDigitos}`);
+                        iniciarSessaoUsuario(dados.user_id, numeroApenasDigitos);
                     }
                 }
                 // DESCONEXÃO SOLICITADA
