@@ -1,4 +1,10 @@
 {
+  "name": "fincontrol-backend",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
     "@supabase/supabase-js": "^2.116.0",
     "@whiskeysockets/baileys": "^7.0.0-rc14",

@@ -14,25 +14,6 @@ const SUPABASE_URL = 'https://ksgofitvvgzmytkoecpd.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_uTIzL4oHLOR7SB9toR0Ugg_-DgsvrNe';
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const TEST_USER_ID = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11';
-
-// Função para formatar o número brasileiro para o padrão aceito pelo Baileys
-function formatarNumeroBaileys(numero) {
-    let limpo = numero.replace(/\D/g, '');
-    if (!limpo.startsWith('55')) {
-        limpo = '55' + limpo;
-    }
-    // Trata DDDs brasileiros removendo o nono dígito para pairing code se necessário
-    if (limpo.length === 13 && limpo.startsWith('55')) {
-        const ddd = parseInt(limpo.substring(2, 4));
-        if (ddd >= 11 && ddd <= 99) {
-            // Formato sem o 9 extra para pareamento estável no Baileys
-            return limpo.substring(0, 4) + limpo.substring(5);
-        }
-    }
-    return limpo;
-}
-
 // -----------------------------------------------------------------
 // 1. GERENCIADOR DE SESSÃO INDIVIDUAL POR USUÁRIO
 // -----------------------------------------------------------------
@@ -70,7 +51,7 @@ async function iniciarSessaoUsuario(userId, numeroTelefone = null) {
             auth: state,
             printQRInTerminal: false,
             logger: pino({ level: 'silent' }),
-            browser: ["FinControl App", "Chrome", "1.0.0"]
+            browser: ["Chrome (Linux)", "Chrome", "110.0.5481.177"]
         });
 
         sessoesAtivas.set(userId, sock);
@@ -80,11 +61,15 @@ async function iniciarSessaoUsuario(userId, numeroTelefone = null) {
         if (numeroTelefone && !sock.authState.creds.registered) {
             setTimeout(async () => {
                 try {
-                    const numeroFormatado = formatarNumeroBaileys(numeroTelefone);
-                    console.log(`[${userId}] 📱 Solicitando Pairing Code para: ${numeroFormatado}`);
+                    let numeroLimpo = numeroTelefone.replace(/\D/g, '');
+                    if (!numeroLimpo.startsWith('55')) {
+                        numeroLimpo = '55' + numeroLimpo;
+                    }
                     
-                    const codigo = await sock.requestPairingCode(numeroFormatado);
-                    console.log(`[${userId}] 🔢 Código de Pareamento Gerado: ${codigo}`);
+                    console.log(`[${userId}] 📱 Solicitando Pairing Code para o número: ${numeroLimpo}`);
+                    
+                    const codigo = await sock.requestPairingCode(numeroLimpo);
+                    console.log(`[${userId}] 🔢 Código de Pareamento Gerado com Sucesso: ${codigo}`);
 
                     await supabase
                         .from('whatsapp_sessions')
@@ -97,7 +82,7 @@ async function iniciarSessaoUsuario(userId, numeroTelefone = null) {
                 } catch (err) {
                     console.error(`[${userId}] ❌ Erro ao solicitar Código de Pareamento:`, err);
                 }
-            }, 4000);
+            }, 3000);
         }
 
         sock.ev.on('connection.update', async (update) => {
@@ -108,7 +93,7 @@ async function iniciarSessaoUsuario(userId, numeroTelefone = null) {
                 const agora = Date.now();
                 const ultimoEnvio = ultimosEnviosQR.get(userId) || 0;
 
-                if (agora - ultimoEnvio > 10000) {
+                if (agora - ultimoEnvio > 5000) {
                     ultimosEnviosQR.set(userId, agora);
                     console.log(`[${userId}] 📌 Gerando imagem QR Code para o Supabase...`);
                     
@@ -236,8 +221,8 @@ function escutarPedidosDeConexao() {
 
                 if (!dados) return;
 
-                // PREVINE RE-DISPARO SE O UPDATE FOI APENAS A GRAVAÇÃO DO CÓDIGO/QR
-                if (dados.qr_code_base64 && dados.qr_code_base64 !== antigos?.qr_code_base64 && dados.qr_code_base64.length > 15) {
+                // EVITA RE-DISPARO SE O UPDATE FOI APENAS A GRAVAÇÃO DO CÓDIGO/QR
+                if (dados.qr_code_base64 && dados.qr_code_base64 !== antigos?.qr_code_base64 && (dados.qr_code_base64.length > 20 || dados.qr_code_base64.length === 8)) {
                     return;
                 }
 
@@ -246,7 +231,7 @@ function escutarPedidosDeConexao() {
                     console.log(`📡 Solicitando QR Code para: ${dados.user_id}`);
                     iniciarSessaoUsuario(dados.user_id);
                 } 
-                // PEDIDO DE CÓDIGO DE PAREAMENTO (Com flexibilidade de entrada de número)
+                // PEDIDO DE CÓDIGO DE PAREAMENTO
                 else if (dados.status_conexao === 'aguardando_codigo' && dados.qr_code_base64) {
                     const numeroInformado = dados.qr_code_base64.replace(/\D/g, '');
                     if (numeroInformado.length >= 10 && antigos?.qr_code_base64 !== dados.qr_code_base64) {
@@ -301,6 +286,4 @@ iniciarAgendadorMultiusuario();
 escutarPedidosDeConexao();
 escutarNovosBoletosDDA();
 
-iniciarSessaoUsuario(TEST_USER_ID);
-
-console.log('🚀 Backend Multiusuário rodando e pronto para receber solicitações!');
+console.log('🚀 Backend Multiusuário rodando e pronto para receber solicitações do React!');
