@@ -23,10 +23,11 @@ async function iniciarSessaoUsuario(userId, numeroTelefone = null) {
         return;
     }
 
+    // Se já estiver registrado e conectado, ignora
     if (sessoesAtivas.has(userId)) {
         const socketExistente = sessoesAtivas.get(userId);
         if (socketExistente && socketExistente.authState?.creds?.registered) {
-            console.log(`[${userId}] ✅ Sessão já ativa.`);
+            console.log(`[${userId}] ✅ Sessão já ativa e registrada.`);
             return socketExistente;
         }
     }
@@ -34,6 +35,7 @@ async function iniciarSessaoUsuario(userId, numeroTelefone = null) {
     inicializandoSessao.set(userId, true);
 
     try {
+        // Limpa sockets residuais anteriores
         if (sessoesAtivas.has(userId)) {
             try {
                 const oldSock = sessoesAtivas.get(userId);
@@ -57,46 +59,49 @@ async function iniciarSessaoUsuario(userId, numeroTelefone = null) {
         sessoesAtivas.set(userId, sock);
         sock.ev.on('creds.update', saveCreds);
 
-        // SOLICITAÇÃO DO CÓDIGO DE PAREAMENTO (8 DÍGITOS)
-        if (numeroTelefone && !sock.authState.creds.registered) {
-            setTimeout(async () => {
-                try {
-                    let numeroLimpo = numeroTelefone.replace(/\D/g, '');
-                    if (!numeroLimpo.startsWith('55')) {
-                        numeroLimpo = '55' + numeroLimpo;
-                    }
-                    
-                    console.log(`[${userId}] 📱 Solicitando Pairing Code para o número: ${numeroLimpo}`);
-                    
-                    const codigo = await sock.requestPairingCode(numeroLimpo);
-                    console.log(`[${userId}] 🔢 Código de Pareamento Gerado com Sucesso: ${codigo}`);
-
-                    await supabase
-                        .from('whatsapp_sessions')
-                        .update({
-                            qr_code_base64: codigo,
-                            status_conexao: 'aguardando_codigo',
-                            updated_at: new Date().toISOString()
-                        })
-                        .eq('user_id', userId);
-                } catch (err) {
-                    console.error(`[${userId}] ❌ Erro ao solicitar Código de Pareamento:`, err);
-                }
-            }, 3000);
-        }
+        // DISPARO DE PAREAMENTO APÓS ESTABILIZAÇÃO DA CONEXÃO
+        let pairingSolicitado = false;
 
         sock.ev.on('connection.update', async (update) => {
             const { connection, qr, lastDisconnect } = update;
 
-            // EMISSÃO DE QR CODE
+            // Solicita o Código de Pareamento quando a conexão inicia
+            if ((connection === 'connecting' || qr) && numeroTelefone && !sock.authState.creds.registered && !pairingSolicitado) {
+                pairingSolicitado = true;
+                setTimeout(async () => {
+                    try {
+                        let numeroLimpo = numeroTelefone.replace(/\D/g, '');
+                        if (!numeroLimpo.startsWith('55')) {
+                            numeroLimpo = '55' + numeroLimpo;
+                        }
+
+                        console.log(`[${userId}] 📱 Solicitando Pairing Code para o número: ${numeroLimpo}`);
+                        const codigo = await sock.requestPairingCode(numeroLimpo);
+                        console.log(`[${userId}] 🔢 Código de Pareamento Gerado com Sucesso: ${codigo}`);
+
+                        await supabase
+                            .from('whatsapp_sessions')
+                            .update({
+                                qr_code_base64: codigo,
+                                status_conexao: 'aguardando_codigo',
+                                updated_at: new Date().toISOString()
+                            })
+                            .eq('user_id', userId);
+                    } catch (err) {
+                        console.error(`[${userId}] ❌ Erro ao solicitar Código de Pareamento:`, err);
+                    }
+                }, 2000);
+            }
+
+            // EMISSÃO DE QR CODE (Apenas se não for login por número)
             if (qr && !numeroTelefone && !sock.authState.creds.registered) {
                 const agora = Date.now();
                 const ultimoEnvio = ultimosEnviosQR.get(userId) || 0;
 
-                if (agora - ultimoEnvio > 5000) {
+                if (agora - ultimoEnvio > 4000) {
                     ultimosEnviosQR.set(userId, agora);
                     console.log(`[${userId}] 📌 Gerando imagem QR Code para o Supabase...`);
-                    
+
                     try {
                         const qrCodeDataUrl = await QRCode.toDataURL(qr);
 
@@ -139,7 +144,7 @@ Seu WhatsApp foi vinculado ao seu *Gerenciador Financeiro FinControl*.`;
             if (connection === 'close') {
                 const motivo = lastDisconnect?.error?.output?.statusCode;
                 console.log(`[${userId}] ⚠️ Conexão encerrada. Motivo:`, motivo);
-                
+
                 sessoesAtivas.delete(userId);
                 ultimosEnviosQR.delete(userId);
 
@@ -221,13 +226,14 @@ function escutarPedidosDeConexao() {
 
                 if (!dados) return;
 
-                // FILTRO ANTI-LOOP: Ignora o evento se for a gravação do QR (DataURL) ou do Código de 8 dígitos (Regex)
                 const valorAtual = dados.qr_code_base64 || '';
-                const eCodigoPar = /^[A-Z0-9]{4}-[A-Z0-9]{4}$/i.test(valorAtual) || valorAtual.length === 8;
+                
+                // BLOQUEIO TOTAL DE RE-TRIGGER: Ignora se for o próprio código de 8 dígitos ou a imagem QR
+                const eCodigoPar = /^[A-Z0-9]{4}-[A-Z0-9]{4}$/i.test(valorAtual) || /^[A-Z0-9]{8}$/i.test(valorAtual);
                 const eImagemQR = valorAtual.startsWith('data:image');
 
                 if (eCodigoPar || eImagemQR) {
-                    return;
+                    return; // Não executa nada pois o valor gravado foi a resposta do próprio backend
                 }
 
                 // PEDIDO DE QR CODE
@@ -235,7 +241,7 @@ function escutarPedidosDeConexao() {
                     console.log(`📡 Solicitando QR Code para: ${dados.user_id}`);
                     iniciarSessaoUsuario(dados.user_id);
                 } 
-                // PEDIDO DE CÓDIGO DE PAREAMENTO (Exige entre 10 e 13 dígitos numéricos)
+                // PEDIDO DE CÓDIGO DE PAREAMENTO
                 else if (dados.status_conexao === 'aguardando_codigo') {
                     const numeroApenasDigitos = valorAtual.replace(/\D/g, '');
                     const eNumeroValido = numeroApenasDigitos.length >= 10 && numeroApenasDigitos.length <= 13;
