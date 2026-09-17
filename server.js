@@ -3,15 +3,21 @@ const { createClient } = require('@supabase/supabase-js');
 const cron = require('node-cron');
 const pino = require('pino');
 const QRCode = require('qrcode');
+const express = require('express');
 
 // Maps em memória
 const sessoesAtivas = new Map();
 const ultimosEnviosQR = new Map();
 const inicializandoSessao = new Map();
 
-// Credenciais do Supabase
-const SUPABASE_URL = 'https://ksgofitvvgzmytkoecpd.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_uTIzL4oHLOR7SB9toR0Ugg_-DgsvrNe';
+// Credenciais dinâmicas do Supabase (lidas das variáveis de ambiente do Railway)
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY; // Deve ser a Service Role Key (sb_secret_...)
+
+if (!SUPABASE_URL || !SUPABASE_KEY) {
+    console.error('❌ ERRO CRÍTICO: Variáveis SUPABASE_URL ou SUPABASE_KEY não foram encontradas nas variáveis de ambiente!');
+}
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // -----------------------------------------------------------------
@@ -242,7 +248,7 @@ function escutarPedidosDeConexao() {
                     iniciarSessaoUsuario(dados.user_id);
                 } 
                 // PEDIDO DE CÓDIGO DE PAREAMENTO
-                else if (dados.status_conexao === 'aguardando_codigo') {
+                if (dados.status_conexao === 'aguardando_codigo') {
                     const numeroApenasDigitos = valorAtual.replace(/\D/g, '');
                     const eNumeroValido = numeroApenasDigitos.length >= 10 && numeroApenasDigitos.length <= 13;
                     const numeroMudou = antigos?.qr_code_base64 !== dados.qr_code_base64;
@@ -293,10 +299,24 @@ function escutarNovosBoletosDDA() {
 }
 
 // -----------------------------------------------------------------
-// 5. INICIALIZAÇÃO DO SERVIDOR
+// 5. INICIALIZAÇÃO DO SERVIDOR HTTP (RAILWAY)
 // -----------------------------------------------------------------
-iniciarAgendadorMultiusuario();
-escutarPedidosDeConexao();
-escutarNovosBoletosDDA();
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-console.log('🚀 Backend Multiusuário rodando e pronto para receber solicitações do React!');
+app.use(express.json());
+
+app.get('/', (req, res) => {
+    res.send('🚀 Backend FinControl WhatsApp Online!');
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Servidor HTTP rodando na porta ${PORT}!`);
+    
+    // Inicia ouvintes do Supabase e Agendadores
+    iniciarAgendadorMultiusuario();
+    escutarPedidosDeConexao();
+    escutarNovosBoletosDDA();
+    
+    console.log('📡 Escutando solicitações do Supabase...');
+});
