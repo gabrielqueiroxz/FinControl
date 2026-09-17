@@ -4,32 +4,46 @@ const cron = require('node-cron');
 const pino = require('pino');
 const QRCode = require('qrcode');
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 
 // Maps em memória
 const sessoesAtivas = new Map();
 const ultimosEnviosQR = new Map();
 const inicializandoSessao = new Map();
 
-// Credenciais dinâmicas do Supabase (lidas das variáveis de ambiente do Railway)
+// Credenciais dinâmicas do Supabase
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY; // Deve ser a Service Role Key (sb_secret_...)
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
-    console.error('❌ ERRO CRÍTICO: Variáveis SUPABASE_URL ou SUPABASE_KEY não foram encontradas nas variáveis de ambiente!');
+    console.error('❌ ERRO CRÍTICO: Variáveis SUPABASE_URL ou SUPABASE_KEY não foram encontradas!');
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+// Função auxiliar para remover pasta de sessão corrompida
+function limparPastaSessao(userId) {
+    const pastaSessao = path.join(__dirname, `sessoes_auth/auth_${userId}`);
+    if (fs.existsSync(pastaSessao)) {
+        try {
+            fs.rmSync(pastaSessao, { recursive: true, force: true });
+            console.log(`[${userId}] 🧹 Pasta de sessão limpa com sucesso.`);
+        } catch (err) {
+            console.error(`[${userId}] ❌ Erro ao limpar pasta de sessão:`, err);
+        }
+    }
+}
+
 // -----------------------------------------------------------------
 // 1. GERENCIADOR DE SESSÃO INDIVIDUAL POR USUÁRIO
 // -----------------------------------------------------------------
-async function iniciarSessaoUsuario(userId, numeroTelefone = null) {
+async function iniciarSessaoUsuario(userId) {
     if (inicializandoSessao.get(userId)) {
         console.log(`[${userId}] ⏳ Inicialização em andamento. Aguarde...`);
         return;
     }
 
-    // Se já estiver registrado e conectado, ignora
     if (sessoesAtivas.has(userId)) {
         const socketExistente = sessoesAtivas.get(userId);
         if (socketExistente && socketExistente.authState?.creds?.registered) {
@@ -41,7 +55,7 @@ async function iniciarSessaoUsuario(userId, numeroTelefone = null) {
     inicializandoSessao.set(userId, true);
 
     try {
-        // Limpa sockets residuais anteriores
+        // Encerra sockets residuais anteriores
         if (sessoesAtivas.has(userId)) {
             try {
                 const oldSock = sessoesAtivas.get(userId);
@@ -51,7 +65,8 @@ async function iniciarSessaoUsuario(userId, numeroTelefone = null) {
             sessoesAtivas.delete(userId);
         }
 
-        const { state, saveCreds } = await useMultiFileAuthState(`sessoes_auth/auth_${userId}`);
+        const pastaAuth = `sessoes_auth/auth_${userId}`;
+        const { state, saveCreds } = await useMultiFileAuthState(pastaAuth);
         const { version } = await fetchLatestBaileysVersion();
 
         const sock = makeWASocket({
@@ -59,54 +74,23 @@ async function iniciarSessaoUsuario(userId, numeroTelefone = null) {
             auth: state,
             printQRInTerminal: false,
             logger: pino({ level: 'silent' }),
-            browser: ["Chrome (Linux)", "Chrome", "110.0.5481.177"]
+            browser: ["FinControl Web", "Chrome", "110.0.5481.177"]
         });
 
         sessoesAtivas.set(userId, sock);
         sock.ev.on('creds.update', saveCreds);
 
-        // DISPARO DE PAREAMENTO APÓS ESTABILIZAÇÃO DA CONEXÃO
-        let pairingSolicitado = false;
-
         sock.ev.on('connection.update', async (update) => {
             const { connection, qr, lastDisconnect } = update;
 
-            // Solicita o Código de Pareamento quando a conexão inicia
-            if ((connection === 'connecting' || qr) && numeroTelefone && !sock.authState.creds.registered && !pairingSolicitado) {
-                pairingSolicitado = true;
-                setTimeout(async () => {
-                    try {
-                        let numeroLimpo = numeroTelefone.replace(/\D/g, '');
-                        if (!numeroLimpo.startsWith('55')) {
-                            numeroLimpo = '55' + numeroLimpo;
-                        }
-
-                        console.log(`[${userId}] 📱 Solicitando Pairing Code para o número: ${numeroLimpo}`);
-                        const codigo = await sock.requestPairingCode(numeroLimpo);
-                        console.log(`[${userId}] 🔢 Código de Pareamento Gerado com Sucesso: ${codigo}`);
-
-                        await supabase
-                            .from('whatsapp_sessions')
-                            .update({
-                                qr_code_base64: codigo,
-                                status_conexao: 'aguardando_codigo',
-                                updated_at: new Date().toISOString()
-                            })
-                            .eq('user_id', userId);
-                    } catch (err) {
-                        console.error(`[${userId}] ❌ Erro ao solicitar Código de Pareamento:`, err);
-                    }
-                }, 2000);
-            }
-
-            // EMISSÃO DE QR CODE (Apenas se não for login por número)
-            if (qr && !numeroTelefone && !sock.authState.creds.registered) {
+            // EMISSÃO EXCLUSIVA DE QR CODE
+            if (qr && !sock.authState.creds.registered) {
                 const agora = Date.now();
                 const ultimoEnvio = ultimosEnviosQR.get(userId) || 0;
 
-                if (agora - ultimoEnvio > 4000) {
+                if (agora - ultimoEnvio > 3000) {
                     ultimosEnviosQR.set(userId, agora);
-                    console.log(`[${userId}] 📌 Gerando imagem QR Code para o Supabase...`);
+                    console.log(`[${userId}] 📌 Gerando nova imagem QR Code...`);
 
                     try {
                         const qrCodeDataUrl = await QRCode.toDataURL(qr);
@@ -139,10 +123,7 @@ async function iniciarSessaoUsuario(userId, numeroTelefone = null) {
                     .eq('user_id', userId);
 
                 const numeroUsuario = sock.user.id.split(':')[0];
-                const mensagemBoasVindas = 
-`🚀 *Conexão Realizada com Sucesso!*
-
-Seu WhatsApp foi vinculado ao seu *Gerenciador Financeiro FinControl*.`;
+                const mensagemBoasVindas = `🚀 *Conexão Realizada com Sucesso!*\n\nSeu WhatsApp foi vinculado ao *FinControl*.`;
 
                 await sock.sendMessage(`${numeroUsuario}@s.whatsapp.net`, { text: mensagemBoasVindas });
             }
@@ -154,17 +135,32 @@ Seu WhatsApp foi vinculado ao seu *Gerenciador Financeiro FinControl*.`;
                 sessoesAtivas.delete(userId);
                 ultimosEnviosQR.delete(userId);
 
-                const deveReconectar = motivo !== DisconnectReason.loggedOut;
+                // TRATAMENTO TRATAMENTO DO ERRO 401 (NÃO AUTORIZADO / SESSÃO EXPIRADA)
+                if (motivo === 401 || motivo === DisconnectReason.loggedOut) {
+                    console.log(`[${userId}] 🛑 Credencial inválida (401). Limpando sessão para novo QR Code...`);
+                    
+                    // Limpa a pasta local corrompida
+                    limparPastaSessao(userId);
 
-                await supabase
-                    .from('whatsapp_sessions')
-                    .update({
-                        status_conexao: 'desconectado',
-                        updated_at: new Date().toISOString()
-                    })
-                    .eq('user_id', userId);
+                    await supabase
+                        .from('whatsapp_sessions')
+                        .update({
+                            qr_code_base64: null,
+                            status_conexao: 'desconectado',
+                            updated_at: new Date().toISOString()
+                        })
+                        .eq('user_id', userId);
 
-                if (deveReconectar) {
+                } else {
+                    // Outros erros temporários de rede: tenta reconectar
+                    await supabase
+                        .from('whatsapp_sessions')
+                        .update({
+                            status_conexao: 'desconectado',
+                            updated_at: new Date().toISOString()
+                        })
+                        .eq('user_id', userId);
+
                     setTimeout(() => iniciarSessaoUsuario(userId), 5000);
                 }
             }
@@ -233,31 +229,17 @@ function escutarPedidosDeConexao() {
                 if (!dados) return;
 
                 const valorAtual = dados.qr_code_base64 || '';
-                
-                // BLOQUEIO TOTAL DE RE-TRIGGER: Ignora se for o próprio código de 8 dígitos ou a imagem QR
-                const eCodigoPar = /^[A-Z0-9]{4}-[A-Z0-9]{4}$/i.test(valorAtual) || /^[A-Z0-9]{8}$/i.test(valorAtual);
                 const eImagemQR = valorAtual.startsWith('data:image');
 
-                if (eCodigoPar || eImagemQR) {
-                    return; // Não executa nada pois o valor gravado foi a resposta do próprio backend
-                }
+                // Evita re-triggering quando o próprio backend salva a imagem do QR Code
+                if (eImagemQR) return;
 
                 // PEDIDO DE QR CODE
                 if (dados.status_conexao === 'aguardando_qr' && antigos?.status_conexao !== 'aguardando_qr') {
                     console.log(`📡 Solicitando QR Code para: ${dados.user_id}`);
+                    limparPastaSessao(dados.user_id); // Garante início limpo
                     iniciarSessaoUsuario(dados.user_id);
                 } 
-                // PEDIDO DE CÓDIGO DE PAREAMENTO
-                if (dados.status_conexao === 'aguardando_codigo') {
-                    const numeroApenasDigitos = valorAtual.replace(/\D/g, '');
-                    const eNumeroValido = numeroApenasDigitos.length >= 10 && numeroApenasDigitos.length <= 13;
-                    const numeroMudou = antigos?.qr_code_base64 !== dados.qr_code_base64;
-
-                    if (eNumeroValido && numeroMudou) {
-                        console.log(`📡 Solicitando Pairing Code para número: ${numeroApenasDigitos}`);
-                        iniciarSessaoUsuario(dados.user_id, numeroApenasDigitos);
-                    }
-                }
                 // DESCONEXÃO SOLICITADA
                 else if (dados.status_conexao === 'desconectado' && antigos?.status_conexao !== 'desconectado') {
                     if (sessoesAtivas.has(dados.user_id)) {
@@ -269,6 +251,7 @@ function escutarPedidosDeConexao() {
                         } catch (e) {}
                         sessoesAtivas.delete(dados.user_id);
                     }
+                    limparPastaSessao(dados.user_id);
                 }
             }
         )
@@ -313,7 +296,6 @@ app.get('/', (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Servidor HTTP rodando na porta ${PORT}!`);
     
-    // Inicia ouvintes do Supabase e Agendadores
     iniciarAgendadorMultiusuario();
     escutarPedidosDeConexao();
     escutarNovosBoletosDDA();
