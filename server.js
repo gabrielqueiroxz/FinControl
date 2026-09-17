@@ -40,7 +40,7 @@ function limparPastaSessao(userId) {
 // -----------------------------------------------------------------
 async function iniciarSessaoUsuario(userId) {
     if (inicializandoSessao.get(userId)) {
-        console.log(`[${userId}] ⏳ Inicialização em andamento. Aguarde...`);
+        console.log(`[${userId}] ⏳ Inicialização já em andamento. Aguarde...`);
         return;
     }
 
@@ -55,7 +55,7 @@ async function iniciarSessaoUsuario(userId) {
     inicializandoSessao.set(userId, true);
 
     try {
-        // Encerra sockets residuais anteriores
+        // Encerra sockets residuais anteriores sem limpar os arquivos
         if (sessoesAtivas.has(userId)) {
             try {
                 const oldSock = sessoesAtivas.get(userId);
@@ -83,7 +83,7 @@ async function iniciarSessaoUsuario(userId) {
         sock.ev.on('connection.update', async (update) => {
             const { connection, qr, lastDisconnect } = update;
 
-            // EMISSÃO EXCLUSIVA DE QR CODE
+            // 1. EMISSÃO EXCLUSIVA DE QR CODE
             if (qr && !sock.authState.creds.registered) {
                 const agora = Date.now();
                 const ultimoEnvio = ultimosEnviosQR.get(userId) || 0;
@@ -109,6 +109,7 @@ async function iniciarSessaoUsuario(userId) {
                 }
             }
 
+            // 2. CONEXÃO ESTABELECIDA
             if (connection === 'open') {
                 console.log(`[${userId}] ✅ Conectado com sucesso!`);
                 ultimosEnviosQR.delete(userId);
@@ -128,18 +129,17 @@ async function iniciarSessaoUsuario(userId) {
                 await sock.sendMessage(`${numeroUsuario}@s.whatsapp.net`, { text: mensagemBoasVindas });
             }
 
+            // 3. CONEXÃO FECHADA OU REINICIADA
             if (connection === 'close') {
                 const motivo = lastDisconnect?.error?.output?.statusCode;
                 console.log(`[${userId}] ⚠️ Conexão encerrada. Motivo:`, motivo);
 
                 sessoesAtivas.delete(userId);
-                ultimosEnviosQR.delete(userId);
 
-                // TRATAMENTO TRATAMENTO DO ERRO 401 (NÃO AUTORIZADO / SESSÃO EXPIRADA)
-                if (motivo === 401 || motivo === DisconnectReason.loggedOut) {
-                    console.log(`[${userId}] 🛑 Credencial inválida (401). Limpando sessão para novo QR Code...`);
-                    
-                    // Limpa a pasta local corrompida
+                // Se foi um Deslogado voluntário ou Falha 401 (NÃO AUTORIZADO)
+                if (motivo === DisconnectReason.loggedOut || motivo === 401) {
+                    console.log(`[${userId}] 🛑 Sessão encerrada/deslogada. Limpando credenciais...`);
+                    ultimosEnviosQR.delete(userId);
                     limparPastaSessao(userId);
 
                     await supabase
@@ -151,17 +151,16 @@ async function iniciarSessaoUsuario(userId) {
                         })
                         .eq('user_id', userId);
 
-                } else {
-                    // Outros erros temporários de rede: tenta reconectar
-                    await supabase
-                        .from('whatsapp_sessions')
-                        .update({
-                            status_conexao: 'desconectado',
-                            updated_at: new Date().toISOString()
-                        })
-                        .eq('user_id', userId);
+                } else if (motivo === DisconnectReason.restartRequired || motivo === 515) {
+                    // CÓDIGO 515 OCORRE LOGO APÓS A LEITURA DO QR CODE!
+                    // NÃO deve alterar o banco para "desconectado". Apenas reinicia o socket reaproveitando as credenciais recém-baixadas.
+                    console.log(`[${userId}] 🔄 Reinicialização necessária (Handshake do QR Code). Reconectando...`);
+                    setTimeout(() => iniciarSessaoUsuario(userId), 1500);
 
-                    setTimeout(() => iniciarSessaoUsuario(userId), 5000);
+                } else {
+                    // Outros erros temporários de rede
+                    console.log(`[${userId}] ⚠️ Erro de rede temporário. Tentando reconectar sem resetar banco...`);
+                    setTimeout(() => iniciarSessaoUsuario(userId), 3000);
                 }
             }
         });
@@ -243,7 +242,7 @@ function escutarPedidosDeConexao() {
                 // DESCONEXÃO SOLICITADA
                 else if (dados.status_conexao === 'desconectado' && antigos?.status_conexao !== 'desconectado') {
                     if (sessoesAtivas.has(dados.user_id)) {
-                        console.log(`[${dados.user_id}] Encerrando sessão...`);
+                        console.log(`[${dados.user_id}] Encerrando sessão por comando do usuário...`);
                         try {
                             const sock = sessoesAtivas.get(dados.user_id);
                             sock.ev.removeAllListeners();
