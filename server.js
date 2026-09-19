@@ -6,6 +6,11 @@ const QRCode = require('qrcode');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const { MercadoPagoConfig, Preference } = require('mercadopago');
+
+// Configuração do Mercado Pago (Substitua pelo seu Access Token de Teste do painel)
+const MERCADO_PAGO_ACCESS_TOKEN = process.env.MERCADO_PAGO_ACCESS_TOKEN || 'SEU_ACCESS_TOKEN_DE_TESTE_AQUI';
+const mpClient = new MercadoPagoConfig({ accessToken: MERCADO_PAGO_ACCESS_TOKEN });
 
 // Maps em memória
 const sessoesAtivas = new Map();
@@ -55,7 +60,6 @@ async function iniciarSessaoUsuario(userId) {
     inicializandoSessao.set(userId, true);
 
     try {
-        // Encerra sockets residuais anteriores sem limpar os arquivos
         if (sessoesAtivas.has(userId)) {
             try {
                 const oldSock = sessoesAtivas.get(userId);
@@ -83,7 +87,6 @@ async function iniciarSessaoUsuario(userId) {
         sock.ev.on('connection.update', async (update) => {
             const { connection, qr, lastDisconnect } = update;
 
-            // 1. EMISSÃO EXCLUSIVA DE QR CODE
             if (qr && !sock.authState.creds.registered) {
                 const agora = Date.now();
                 const ultimoEnvio = ultimosEnviosQR.get(userId) || 0;
@@ -109,7 +112,6 @@ async function iniciarSessaoUsuario(userId) {
                 }
             }
 
-            // 2. CONEXÃO ESTABELECIDA
             if (connection === 'open') {
                 console.log(`[${userId}] ✅ Conectado com sucesso!`);
                 ultimosEnviosQR.delete(userId);
@@ -129,14 +131,12 @@ async function iniciarSessaoUsuario(userId) {
                 await sock.sendMessage(`${numeroUsuario}@s.whatsapp.net`, { text: mensagemBoasVindas });
             }
 
-            // 3. CONEXÃO FECHADA OU REINICIADA
             if (connection === 'close') {
                 const motivo = lastDisconnect?.error?.output?.statusCode;
                 console.log(`[${userId}] ⚠️ Conexão encerrada. Motivo:`, motivo);
 
                 sessoesAtivas.delete(userId);
 
-                // Se foi um Deslogado voluntário ou Falha 401 (NÃO AUTORIZADO)
                 if (motivo === DisconnectReason.loggedOut || motivo === 401) {
                     console.log(`[${userId}] 🛑 Sessão encerrada/deslogada. Limpando credenciais...`);
                     ultimosEnviosQR.delete(userId);
@@ -188,17 +188,13 @@ async function dispararLembrete(momento) {
 
     if (!sessoes) return;
 
-    // --- CORREÇÃO DA JANELA DE DATAS (SEMANA ATUAL + ATRASADOS) ---
     const hoje = new Date();
-    
-    // Obtém a Segunda-feira da semana corrente
-    const diaDaSemana = hoje.getDay(); // 0 = Domingo, 1 = Segunda...
+    const diaDaSemana = hoje.getDay();
     const diffParaSegunda = hoje.getDate() - diaDaSemana + (diaDaSemana === 0 ? -6 : 1);
     
     const inicioSemana = new Date(hoje.setDate(diffParaSegunda));
     inicioSemana.setHours(0, 0, 0, 0);
 
-    // Obtém o Domingo (fim da semana corrente)
     const fimSemana = new Date(inicioSemana);
     fimSemana.setDate(inicioSemana.getDate() + 6);
     fimSemana.setHours(23, 59, 59, 999);
@@ -208,13 +204,12 @@ async function dispararLembrete(momento) {
     for (const sessao of sessoes) {
         const { user_id } = sessao;
 
-        // Seleciona apenas contas com status 'pendente' cujo vencimento é <= domingo desta semana
         const { data: contas } = await supabase
             .from('contas')
             .select('nome, valor, vencimento')
             .eq('user_id', user_id)
             .eq('status', 'pendente')
-            .lte('vencimento', fimSemanaStr) // Inclui atrasados e os que vencem até domingo
+            .lte('vencimento', fimSemanaStr)
             .order('vencimento', { ascending: true });
 
         if (!contas || contas.length === 0) continue;
@@ -307,6 +302,32 @@ app.use(express.json());
 
 app.get('/', (req, res) => {
     res.send('🚀 Backend FinControl WhatsApp Online!');
+});
+
+// Rota para gerar a preferência de checkout do Mercado Pago
+app.post('/criar-preferencia', async (req, res) => {
+    try {
+        const preference = new Preference(mpClient);
+
+        const result = await preference.create({
+            body: {
+                items: [
+                    {
+                        title: 'Plano VIP FinControl',
+                        quantity: 1,
+                        unit_price: 29.90,
+                        currency_id: 'BRL',
+                    },
+                ],
+            },
+        });
+
+        // Retorna o link de sandbox/teste para o frontend
+        res.json({ init_point: result.sandbox_init_point || result.init_point });
+    } catch (error) {
+        console.error('Erro ao criar preferência no Mercado Pago:', error);
+        res.status(500).json({ error: 'Erro ao gerar link de pagamento.' });
+    }
 });
 
 app.listen(PORT, '0.0.0.0', () => {
