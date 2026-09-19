@@ -4,6 +4,7 @@ const cron = require('node-cron');
 const pino = require('pino');
 const QRCode = require('qrcode');
 const express = require('express');
+const cors = require('cors'); // 1. Importação do CORS adicionada
 const fs = require('fs');
 const path = require('path');
 const { MercadoPagoConfig, Preference } = require('mercadopago');
@@ -297,6 +298,13 @@ function escutarNovosBoletosDDA() {
 // -----------------------------------------------------------------
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// 2. Configuração e habilitação do CORS para requisições externas/frontend
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
 app.use(express.json());
 
