@@ -4,13 +4,13 @@ const cron = require('node-cron');
 const pino = require('pino');
 const QRCode = require('qrcode');
 const express = require('express');
-const cors = require('cors'); // 1. Importação do CORS adicionada
+const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const { MercadoPagoConfig, Preference } = require('mercadopago');
 
-// Configuração do Mercado Pago (Substitua pelo seu Access Token de Teste do painel)
-const MERCADO_PAGO_ACCESS_TOKEN = process.env.MERCADO_PAGO_ACCESS_TOKEN || 'SEU_ACCESS_TOKEN_DE_TESTE_AQUI';
+// Configuração do Mercado Pago (Utiliza o Access Token de Produção vindo do Railway)
+const MERCADO_PAGO_ACCESS_TOKEN = process.env.MERCADO_PAGO_ACCESS_TOKEN || 'SEU_ACCESS_TOKEN_DE_PRODUCAO_AQUI';
 const mpClient = new MercadoPagoConfig({ accessToken: MERCADO_PAGO_ACCESS_TOKEN });
 
 // Maps em memória
@@ -299,7 +299,6 @@ function escutarNovosBoletosDDA() {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 2. Configuração e habilitação do CORS para requisições externas/frontend
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -312,7 +311,7 @@ app.get('/', (req, res) => {
     res.send('🚀 Backend FinControl WhatsApp Online!');
 });
 
-// Rota para gerar a preferência de checkout do Mercado Pago
+// Rota de criação de preferência de pagamento (Produção)
 app.post('/criar-preferencia', async (req, res) => {
     try {
         const preference = new Preference(mpClient);
@@ -330,8 +329,8 @@ app.post('/criar-preferencia', async (req, res) => {
             },
         });
 
-        // Retorna o link de sandbox/teste para o frontend
-        res.json({ init_point: result.sandbox_init_point || result.init_point });
+        // Retorna o init_point oficial de produção do Mercado Pago
+        res.json({ init_point: result.init_point });
     } catch (error) {
         console.error('Erro ao criar preferência no Mercado Pago:', error);
         res.status(500).json({ error: 'Erro ao gerar link de pagamento.' });
