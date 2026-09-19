@@ -152,13 +152,10 @@ async function iniciarSessaoUsuario(userId) {
                         .eq('user_id', userId);
 
                 } else if (motivo === DisconnectReason.restartRequired || motivo === 515) {
-                    // CÓDIGO 515 OCORRE LOGO APÓS A LEITURA DO QR CODE!
-                    // NÃO deve alterar o banco para "desconectado". Apenas reinicia o socket reaproveitando as credenciais recém-baixadas.
                     console.log(`[${userId}] 🔄 Reinicialização necessária (Handshake do QR Code). Reconectando...`);
                     setTimeout(() => iniciarSessaoUsuario(userId), 1500);
 
                 } else {
-                    // Outros erros temporários de rede
                     console.log(`[${userId}] ⚠️ Erro de rede temporário. Tentando reconectar sem resetar banco...`);
                     setTimeout(() => iniciarSessaoUsuario(userId), 3000);
                 }
@@ -191,20 +188,43 @@ async function dispararLembrete(momento) {
 
     if (!sessoes) return;
 
+    // --- CORREÇÃO DA JANELA DE DATAS (SEMANA ATUAL + ATRASADOS) ---
+    const hoje = new Date();
+    
+    // Obtém a Segunda-feira da semana corrente
+    const diaDaSemana = hoje.getDay(); // 0 = Domingo, 1 = Segunda...
+    const diffParaSegunda = hoje.getDate() - diaDaSemana + (diaDaSemana === 0 ? -6 : 1);
+    
+    const inicioSemana = new Date(hoje.setDate(diffParaSegunda));
+    inicioSemana.setHours(0, 0, 0, 0);
+
+    // Obtém o Domingo (fim da semana corrente)
+    const fimSemana = new Date(inicioSemana);
+    fimSemana.setDate(inicioSemana.getDate() + 6);
+    fimSemana.setHours(23, 59, 59, 999);
+
+    const fimSemanaStr = fimSemana.toISOString().split('T')[0];
+
     for (const sessao of sessoes) {
         const { user_id } = sessao;
+
+        // Seleciona apenas contas com status 'pendente' cujo vencimento é <= domingo desta semana
         const { data: contas } = await supabase
             .from('contas')
-            .select('nome, valor')
+            .select('nome, valor, vencimento')
             .eq('user_id', user_id)
-            .eq('status', 'pendente');
+            .eq('status', 'pendente')
+            .lte('vencimento', fimSemanaStr) // Inclui atrasados e os que vencem até domingo
+            .order('vencimento', { ascending: true });
 
-        const totalPendente = contas ? contas.reduce((acc, item) => acc + item.valor, 0) : 0;
+        if (!contas || contas.length === 0) continue;
+
+        const totalPendente = contas.reduce((acc, item) => acc + Number(item.valor), 0);
         const sock = sessoesAtivas.get(user_id);
 
         if (sock && totalPendente > 0) {
             const numeroUsuario = sock.user.id.split(':')[0];
-            let listaContas = contas.map(c => `• ${c.nome}: R$ ${c.valor.toFixed(2)}`).join('\n');
+            let listaContas = contas.map(c => `• ${c.nome}: R$ ${Number(c.valor).toFixed(2)}`).join('\n');
             const mensagem = `📊 *LEMBRETE DE FINANÇAS*\n\nVocê possui *R$ ${totalPendente.toFixed(2)}* em contas pendentes esta semana.\n\n*Compromissos:*\n${listaContas}`;
 
             await sock.sendMessage(`${numeroUsuario}@s.whatsapp.net`, { text: mensagem });
@@ -230,16 +250,13 @@ function escutarPedidosDeConexao() {
                 const valorAtual = dados.qr_code_base64 || '';
                 const eImagemQR = valorAtual.startsWith('data:image');
 
-                // Evita re-triggering quando o próprio backend salva a imagem do QR Code
                 if (eImagemQR) return;
 
-                // PEDIDO DE QR CODE
                 if (dados.status_conexao === 'aguardando_qr' && antigos?.status_conexao !== 'aguardando_qr') {
                     console.log(`📡 Solicitando QR Code para: ${dados.user_id}`);
-                    limparPastaSessao(dados.user_id); // Garante início limpo
+                    limparPastaSessao(dados.user_id);
                     iniciarSessaoUsuario(dados.user_id);
                 } 
-                // DESCONEXÃO SOLICITADA
                 else if (dados.status_conexao === 'desconectado' && antigos?.status_conexao !== 'desconectado') {
                     if (sessoesAtivas.has(dados.user_id)) {
                         console.log(`[${dados.user_id}] Encerrando sessão por comando do usuário...`);
