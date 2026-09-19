@@ -7,11 +7,12 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
-const { MercadoPagoConfig, Preference } = require('mercadopago');
+const { MercadoPagoConfig, Preference, Payment } = require('mercadopago');
 
 // Configuração do Mercado Pago (Utiliza o Access Token de Produção vindo do Railway)
 const MERCADO_PAGO_ACCESS_TOKEN = process.env.MERCADO_PAGO_ACCESS_TOKEN || 'SEU_ACCESS_TOKEN_DE_PRODUCAO_AQUI';
 const mpClient = new MercadoPagoConfig({ accessToken: MERCADO_PAGO_ACCESS_TOKEN });
+const paymentClient = new Payment(mpClient);
 
 // Maps em memória
 const sessoesAtivas = new Map();
@@ -314,6 +315,7 @@ app.get('/', (req, res) => {
 // Rota de criação de preferência de pagamento (Produção)
 app.post('/criar-preferencia', async (req, res) => {
     try {
+        const { userId } = req.body;
         const preference = new Preference(mpClient);
 
         const result = await preference.create({
@@ -326,6 +328,14 @@ app.post('/criar-preferencia', async (req, res) => {
                         currency_id: 'BRL',
                     },
                 ],
+                external_reference: userId || '',
+                back_urls: {
+                    success: 'https://meutrocado.site?status=success',
+                    failure: 'https://meutrocado.site?status=failure',
+                    pending: 'https://meutrocado.site?status=pending'
+                },
+                auto_return: 'approved',
+                notification_url: `${req.protocol}://${req.get('host')}/webhook-mercadopago`
             },
         });
 
@@ -334,6 +344,45 @@ app.post('/criar-preferencia', async (req, res) => {
     } catch (error) {
         console.error('Erro ao criar preferência no Mercado Pago:', error);
         res.status(500).json({ error: 'Erro ao gerar link de pagamento.' });
+    }
+});
+
+// Webhook para receber confirmações de pagamento do Mercado Pago
+app.post('/webhook-mercadopago', async (req, res) => {
+    try {
+        const { type, data } = req.body;
+
+        if (type === 'payment' && data?.id) {
+            const payment = await paymentClient.get({ id: data.id });
+
+            if (payment.status === 'approved') {
+                const userId = payment.external_reference;
+
+                if (userId) {
+                    console.log(`✅ Pagamento APROVADO para o usuário: ${userId}`);
+
+                    // Atualiza a tabela de usuários / perfis no Supabase
+                    const { error } = await supabase
+                        .from('profiles') // Ajuste o nome da tabela se for 'users' ou 'perfis'
+                        .update({ 
+                            plan: 'vip',
+                            updated_at: new Date().toISOString()
+                        })
+                        .eq('id', userId);
+
+                    if (error) {
+                        console.error(`❌ Erro ao atualizar status VIP no Supabase:`, error);
+                    } else {
+                        console.log(`🎉 Usuário ${userId} promovido a VIP com sucesso!`);
+                    }
+                }
+            }
+        }
+
+        res.sendStatus(200);
+    } catch (error) {
+        console.error('❌ Erro ao processar Webhook do Mercado Pago:', error);
+        res.sendStatus(500);
     }
 });
 
