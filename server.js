@@ -324,7 +324,7 @@ app.post('/criar-preferencia', async (req, res) => {
                     {
                         title: 'Plano VIP FinControl',
                         quantity: 1,
-                        unit_price: 1.00, // Alterado para R$ 1,00 para testes
+                        unit_price: 9.99, // Atualizado para R$ 9,99
                         currency_id: 'BRL',
                     },
                 ],
